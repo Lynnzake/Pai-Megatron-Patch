@@ -159,11 +159,11 @@ EP=$9
 HF_DIR=${10}                   # HF权重路径(mcore2hf时必须提供)
 ```
 ```bash
-cd /data/tujie/Qwen3/Pai-Megatron-Patch/toolkits/distributed_checkpoints_convertor/
+cd /xxx/Pai-Megatron-Patch/toolkits/distributed_checkpoints_convertor/
 bash scripts/qwen3/run_8xH20.sh \
 A3B \
-/data/qyx/model/Qwen3-30B-A3B/Qwen3-30B-A3B \
-/data/tujie/Qwen3/qwen-ckpts/Qwen3-30B-A3B-to-mcore  \
+/xxx/Qwen3-30B-A3B/Qwen3-30B-A3B \
+/xxx/qwen-ckpts/Qwen3-30B-A3B-to-mcore  \
 false \
 true \
 bf16 \
