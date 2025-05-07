@@ -34,7 +34,11 @@ wget -P $python_path/flashattn_hopper https://raw.githubusercontent.com/Dao-AILa
 
 # 退出容器后提交更改
 docker ps # 查看容器id
-docker commit <container-id> tujie-qwen3-megatron:25.04 # 提交更改到一个新的镜像
+docker commit <container-id> qwen3-megatron:25.04 # 提交更改到一个新的镜像
+
+# 为了后续实现模型格式的分布式转换，保存镜像到另外的主机
+docker save -o qwen3-megatron.tar qwen3-megatron:25.04
+docker load -i qwen3-megatron.tar
 ```
 
 安装flash-attn3 成功后可以看到
@@ -112,7 +116,9 @@ bf16
 ```
 
 如果需要自定义转换脚本，请参阅分布式转换工具。
-修改scripts/qwen3/run_8xH20.sh 中的TP，PP，EP参数从命令行中接受
+
+
+**修改scripts/qwen3/run_8xH20.sh 中的TP，PP，EP参数从命令行中传入**
 
 ```bash
 # vim scripts/qwen3/run_8xH20.sh
@@ -121,6 +127,7 @@ bf16
 TP=$7
 PP=$8
 EP=$9
+HF_DIR=${10} 
 
 elif [ $MODEL_SIZE = A3B ]; then
     GPT_MODEL_ARGS+=(
