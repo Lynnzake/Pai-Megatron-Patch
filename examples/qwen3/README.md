@@ -24,10 +24,48 @@ cd Pai-Megatron-Patch
 
 目前Qwen3-MoE已支持使用FlashAttention-3加速计算，但只能在Hopper架构的GPU卡上进行运算。若需要在H卡上使用FA3，请在DSW的容器中按如下指令安装并保存镜像
 ```bash
-pip install "git+https://github.com/Dao-AILab/flash-attention.git#egg=flashattn-hopper&subdirectory=hopper"
+# 从源码进行安装，需要加上-recurse-submodules以下载相关的子仓库以完成编译
+git clone --recurse-submodules https://github.com/Dao-AILab/flash-attention.git
+cd flash-attention/hopper
+python setup.py install
 python_path=`python -c "import site; print(site.getsitepackages()[0])"`
 mkdir -p $python_path/flashattn_hopper
 wget -P $python_path/flashattn_hopper https://raw.githubusercontent.com/Dao-AILab/flash-attention/main/hopper/flash_attn_interface.py
+
+# 退出容器后提交更改
+docker ps # 查看容器id
+docker commit <container-id> tujie-qwen3-megatron:25.04 # 提交更改到一个新的镜像
+```
+
+安装flash-attn3 成功后可以看到
+```bash
+Using /usr/local/lib/python3.12/dist-packages
+Searching for setuptools==75.8.2
+Best match: setuptools 75.8.2
+Adding setuptools 75.8.2 to easy-install.pth file
+
+Using /usr/local/lib/python3.12/dist-packages
+Searching for typing-extensions==4.12.2
+Best match: typing-extensions 4.12.2
+typing-extensions 4.12.2 is already the active version in easy-install.pth
+
+Using /usr/local/lib/python3.12/dist-packages/setuptools/_vendor
+Searching for filelock==3.17.0
+Best match: filelock 3.17.0
+Adding filelock 3.17.0 to easy-install.pth file
+
+Using /usr/local/lib/python3.12/dist-packages
+Searching for MarkupSafe==3.0.2
+Best match: MarkupSafe 3.0.2
+Adding MarkupSafe 3.0.2 to easy-install.pth file
+
+Using /usr/local/lib/python3.12/dist-packages
+Searching for mpmath==1.3.0
+Best match: mpmath 1.3.0
+Adding mpmath 1.3.0 to easy-install.pth file
+
+Using /usr/local/lib/python3.12/dist-packages
+Finished processing dependencies for flash-attn-3==3.0.0b1
 ```
 
 ## 预训练数据集和模型下载
@@ -74,6 +112,66 @@ bf16
 ```
 
 如果需要自定义转换脚本，请参阅分布式转换工具。
+修改scripts/qwen3/run_8xH20.sh 中的TP，PP，EP参数从命令行中接受
+
+```bash
+# vim scripts/qwen3/run_8xH20.sh
+
+
+TP=$7
+PP=$8
+EP=$9
+
+elif [ $MODEL_SIZE = A3B ]; then
+    GPT_MODEL_ARGS+=(
+        --num-layers 48
+        --hidden-size 2048
+        --ffn-hidden-size 6144
+        --moe-ffn-hidden-size 768
+        --num-attention-heads 32
+        --untie-embeddings-and-output-weights
+        --moe-grouped-gemm
+        --moe-router-score-function softmax
+        --moe-token-dispatcher-type alltoall
+        --moe-router-topk 8
+        --moe-layer-freq "'([1]*48)'"
+        --num-experts 128
+        --num-query-groups 4
+    )
+    if [ -z  ${MODEL_PARALLEL_ARGS} ]; then
+        MODEL_PARALLEL_ARGS=(
+            --tensor-model-parallel-size ${TP}
+            --pipeline-model-parallel-size ${PP}
+            --expert-model-parallel-size ${EP}
+        )
+    fi
+```
+```bash
+MODEL_SIZE=$1               # 模型大小，0.6B, 1.7B, 4B, 8B, 14B, 32B, A3B, A22B
+LOAD_DIR=$2                 # 源权重路径
+SAVE_DIR=$3                 # 目标权重路径
+MG2HF=$4                    # 转换方向 可选: true, false
+USE_CUDA=$5                 # 是否使用GPU转换 建议: true
+PR=$6                       # 转换精度 可选: fp32 bf16 fp16
+TP=$7
+PP=$8
+EP=$9
+HF_DIR=${10}                   # HF权重路径(mcore2hf时必须提供)
+```
+```bash
+cd /data/tujie/Qwen3/Pai-Megatron-Patch/toolkits/distributed_checkpoints_convertor/
+bash scripts/qwen3/run_8xH20.sh \
+A3B \
+/data/qyx/model/Qwen3-30B-A3B/Qwen3-30B-A3B \
+/data/tujie/Qwen3/qwen-ckpts/Qwen3-30B-A3B-to-mcore  \
+false \
+true \
+bf16 \
+4 \
+2 \
+2 \
+```
+
 
 ### Megatron-Core预训练及指令微调
 在Qwen3 MoE中，我们已将预训练和微调整合到`run_mcore_qwen3.sh`脚本，对于不同的使用场景，二者各参数的意义有所不同。
