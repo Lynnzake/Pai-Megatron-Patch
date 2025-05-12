@@ -25,12 +25,12 @@ cd Pai-Megatron-Patch
 目前Qwen3-MoE已支持使用FlashAttention-3加速计算，但只能在Hopper架构的GPU卡上进行运算。若需要在H卡上使用FA3，请在DSW的容器中按如下指令安装并保存镜像
 ```bash
 # 从源码进行安装，需要加上-recurse-submodules以下载相关的子仓库以完成编译
-git clone --recurse-submodules https://github.com/Dao-AILab/flash-attention.git
-cd flash-attention/hopper
-python setup.py install
-python_path=`python -c "import site; print(site.getsitepackages()[0])"`
-mkdir -p $python_path/flashattn_hopper
-wget -P $python_path/flashattn_hopper https://raw.githubusercontent.com/Dao-AILab/flash-attention/main/hopper/flash_attn_interface.py
+WARNING:DotProductAttention:flash-attn v3 may provide important feature support or performance improvement. Please install flash-attn v3 by
+(1) git clone --recurse-modules https://github.com/Dao-AILab/flash-attention.git
+(2) cd flash-attention/ && git checkout 27f501d && cd hopper/ && python setup.py install
+(3) python_path=`python -c "import site; print(site.getsitepackages()[0])"`
+(4) mkdir -p $python_path/flash_attn_3
+(5) wget -P $python_path/flash_attn_3 https://raw.githubusercontent.com/Dao-AILab/flash-attention/27f501dbe011f4371bff938fe7e09311ab3002fa/hopper/flash_attn_interface.pynvidia
 
 # 退出容器后提交更改
 docker ps # 查看容器id
@@ -249,6 +249,77 @@ false \
 10000  \
 100   \
 /mnt/logs/output_mcore_qwen3_pretrain
+```
+
+运行预训练脚本报错，
+```bash
+[rank9]: Traceback (most recent call last):
+[rank9] :
+[rank9]: File "/data/tujie/Qwen3/Pai-Megatron-Patch/examples/qwen3/pretrain_qwen.py", line 141, in < module>
+pretrain(
+[rank9] :
+File "/data/tujie/Qwen3/Pai-Megatron-Patch/Megatron-LM-250328/megatron/training/training.py", line 726, in pretrain
+[rank9] :
+iteration, num_floating_point_operations_so_far = train(
+[rank9] :
+AAAAAA
+[rank9] :
+File "/data/tujie/Owen3/Pai-Megatron-Patch/Megatron-LM-250328/megatron/training/training.py", line 1909, in train
+[rank9] :
+train_step(forward_step_func,
+[rank9] :
+File "/data/tujie/Qwen3/Pai-Megatron-Patch/Megatron-LM-250328/megatron/training/training.py", line 1172, in train_step
+[rank9]:
+losses_reduced = forward_backward_func(
+[rank9] :
+AAAAAAAAAAAAAAAAAAAAAA
+
+[rank9]: File "/data/tujie/Qwen3/Pai-Megatron-Patch/Megatron-LM-250328/megatron/core/pipeline_parallel/schedules.py", line 1918, in
+
+forward_backward_pipelining_without_interleaving
+[rank9] :
+input_tensor-grad = backward_step(
+[rank9] :
+ЛААААААААААААА
+[rank9] :
+File "/data/tujie/Qwen3/Pai-Megatron-Patch/Megatron-LM-250328/megatron/core/pipeline_parallel/schedules.py"
+, line 390, in backward_step
+Trank9
+custom_backwardoutput_tensor [0], output_tensor-grad[0])
+[rank9] :
+File "/data/tujie/Qwen3/Pai-Megatron-Patch/Megatron-LM-250328/megatron/core/pipeline_parallel/schedules.py"
+, line 151, in custom_backward
+[rank9]:
+Variable._execution_engine.run_backward(
+frank9] :
+File "/usr/local/lib/python3.12/dist-packages/torch/autograd/function.py", line 307, in apply
+• ink9] :
+return user_fn(self, *args)
+[rank9]:
+AAAAAAAAAAAAAAAAAAAA
+[rank9] :
+File "/usr/local/lib/python3.12/dist-packages/transformer_engine/pytorch/module/grouped_linear.py", line 270, in backward
+[rank9] :
+general_grouped_gemm(
+Trank9:
+File "/usr/local/lib/python3.12/dist-packages/transformer_engine/pytorch/cpp_extensions/gemm.py", line 206, in general_grouped_gemm
+[rank9]:
+bias = tex.te_general_grouped_gemm(l
+Trank9:
+AAAAAAAAAAAAAAAAAAAAAAAAAAAA
+
+[rank9]: RuntimeError: The specified pointer resides on host memory and is not registered with any CUDA device.
+```
+这是moe grouped gemm 的 bug，更新TE 到v2.2版本可解决问题
+```bash
+vim /etc/pip/constraints.txt # 删除transformer-engine那行
+git clone --recurse-submodules https://github.com/NVIDIA/TransformerEngine.git
+
+cd TransformerEngine
+git tag
+git checkout v2.2.1 # 2.2版本安装不成功，TE和PyTorch无法建立连接
+export NVTE_FRAMEWORK=pytorch   # Optionally set framework
+pip3 install . -vvv # Build and install
 ```
 
 #### 指令微调示例
