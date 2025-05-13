@@ -193,13 +193,17 @@ def main():
     semaphore = Semaphore(10000 + args.workers)
 
     # use multiprocessing to iterate over input documents
+    # 遍历输入目录 args.input 下的所有文件
+    # yield_from_files 是一个生成器，逐行从文件中读取数据（并受 Semaphore 控制，以限制内存使用）
     file_list = os.listdir(args.input)
     path_list = [os.path.join(args.input, file) for file in file_list]
     fin = yield_from_files(path_list, semaphore)
 
     if args.workers > 1:
+        # 多进程处理 fin 生成的文档，调用 encoder.encode 进行编码。
         pool = multiprocessing.Pool(args.workers,
                                     initializer=encoder.initializer)
+        # 编码结果应为字典形式，如：{"text": [[1, 2, 3], [4, 5, 6]]}
         encoded_docs = pool.imap(encoder.encode, fin, chunksize=25)
     else:
         encoder.initializer()
@@ -209,10 +213,12 @@ def main():
     output_idx_files = {}
     builders = {}
     for key in args.jsonl_keys:
+        # 针对每个指定的 jsonl_key（例如 'text'），构建一个 .bin 和 .idx 文件
         output_bin_files[key] = '{}_{}_{}.bin'.format(args.output_prefix, key,
                                                       'document')
         output_idx_files[key] = '{}_{}_{}.idx'.format(args.output_prefix, key,
                                                       'document')
+        # 使用 IndexedDatasetBuilder 创建数据集构建器（写入二进制文件用）
         builders[key] = indexed_dataset.IndexedDatasetBuilder(
             output_bin_files[key],
             dtype=indexed_dataset.DType.optimal_dtype(tokenizer.vocab_size),
@@ -222,16 +228,19 @@ def main():
     proc_start = time.time()
     total_bytes_processed = 0
     pbar = tqdm.tqdm()
+    # 每个 doc 是由 encoder 处理过的 tokenized 文本。
     for i, (doc, bytes_processed) in enumerate(encoded_docs, start=1):
         total_bytes_processed += bytes_processed
 
         semaphore.release()
 
         # add each tokenized document / sentence
+        # 每个 sentence 是一个 token_id 序列（即一个段落或句子）。
         for key, sentences in doc.items():
             for sentence in sentences:
                 builders[key].add_item(torch.IntTensor(sentence))
             # separate with eos token
+            # .end_document() 会在文档之间插入特殊分隔（如 <eos> token）。
             builders[key].end_document()
 
         # log progress
@@ -246,6 +255,7 @@ def main():
 
     # save output file
     for key in args.jsonl_keys:
+        # .finalize() 会写入 .idx 文件并关闭 .bin 文件
         builders[key].finalize(output_idx_files[key])
 
 
