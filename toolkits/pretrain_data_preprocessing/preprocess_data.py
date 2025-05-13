@@ -167,12 +167,35 @@ def get_args():
     return args
 
 
+"""
+信号量（Semaphore）用于限制同时处理的文档数量。在主处理逻辑中我们看到：
+
+semaphore = Semaphore(10000 + args.workers)
+这意味着最多允许 10000 + workers 个数据项被处理或挂起在内存中，防止爆内存或过度打开文件。
+
+处理完每条数据后，会手动 semaphore.release()，释放信号量：
+
+for i, (doc, bytes_processed) in enumerate(encoded_docs, start=1):
+    ...
+    semaphore.release()
+"""
 def yield_from_files(fnames: list, semaphore):
+    """
+    - fnames: 一个文件路径列表。
+    - semaphore: 一个多线程/多进程中的信号量，用于限制并发数（例如限制内存使用或 I/O 访问）。
+    """
     def yielder(fname, semaphore):
         for f in filter(lambda x: x, lmd.Reader(fname).stream_data()):
+            # lmd.Reader(fname).stream_data()：逐条读取文件中数据（通常是 JSONL）。
+            # filter(lambda x: x, ...)：过滤掉空行或无效数据。
+            # 每读取一条数据，就先 semaphore.acquire()，表示占用一个处理资源位。
+            # 然后将这条数据 yield 出去。
             semaphore.acquire()
             yield f
-
+    # 主循环：
+    # 对每个文件：
+    # 先占用一个信号量（代表要打开并处理这个文件）。
+    # 然后用 yield from 把 yielder(fname) 生成的每条数据逐条输出。
     for fname in fnames:
         semaphore.acquire()
 
@@ -201,9 +224,13 @@ def main():
 
     if args.workers > 1:
         # 多进程处理 fin 生成的文档，调用 encoder.encode 进行编码。
+        # fin 是一个文档生成器，代表了所有输入文件中按顺序读取的数据流，用于供多进程进行文本编码处理。
+        # fin每次返回一个jsonl文档，包含了一行json数据
         pool = multiprocessing.Pool(args.workers,
                                     initializer=encoder.initializer)
         # 编码结果应为字典形式，如：{"text": [[1, 2, 3], [4, 5, 6]]}
+        # pool.imap 是 Python 多进程库 multiprocessing 中的一个方法，用于并发地按顺序处理可迭代对象，是对 map 的惰性（lazy）版本。 （惰性迭代不会一次将所有数据放到内存中）
+        # 使用多进程池，把 fin 生成的一条条 JSON 文档，分批（每 25 条）并行送到 encoder.encode() 中处理，按顺序返回处理结果。
         encoded_docs = pool.imap(encoder.encode, fin, chunksize=25)
     else:
         encoder.initializer()
@@ -212,6 +239,8 @@ def main():
     output_bin_files = {}
     output_idx_files = {}
     builders = {}
+    # {output_prefix}_{key}_document.bin：token ID 的二进制数据
+    # {output_prefix}_{key}_document.idx：索引文件，标识每条记录的位置
     for key in args.jsonl_keys:
         # 针对每个指定的 jsonl_key（例如 'text'），构建一个 .bin 和 .idx 文件
         output_bin_files[key] = '{}_{}_{}.bin'.format(args.output_prefix, key,
@@ -219,6 +248,12 @@ def main():
         output_idx_files[key] = '{}_{}_{}.idx'.format(args.output_prefix, key,
                                                       'document')
         # 使用 IndexedDatasetBuilder 创建数据集构建器（写入二进制文件用）
+        """
+        indexed_dataset.IndexedDatasetBuilder(...) 是用于构建 高效可索引的数据集文件 的类，输出两个文件：
+            - .bin 文件：保存所有 token ID，连续的二进制数据
+            - .idx 文件：保存每一条记录的起止位置，支持快速随机访问
+        这个结构被 Megatron-LM、Fairseq 等用于加载预训练数据。
+        """
         builders[key] = indexed_dataset.IndexedDatasetBuilder(
             output_bin_files[key],
             dtype=indexed_dataset.DType.optimal_dtype(tokenizer.vocab_size),
