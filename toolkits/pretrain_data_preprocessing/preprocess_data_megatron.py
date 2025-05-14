@@ -62,6 +62,7 @@ class Encoder(object):
             Encoder.splitter = IdentitySplitter()
 
     # 将文本按照最大长度切分并进行句子分割（可选）
+    # 对于我们的arrow文件，已经切分好了，arrow文件中的每条数据都是8192的长度
     def split(self, json_line):
         data = json.loads(json_line)
         output = {}
@@ -69,6 +70,8 @@ class Encoder(object):
         for key in self.args.json_keys:
             text = data[key]
             max_len = 1000000
+            # 使用滑动窗口进行数据集的制作，这是nanogpt的做法，适用于数据集比较小时
+            # 现有业务数据量已经达到这个水平，因此，不再需要sliding windows
             tokens_list = [Encoder.splitter.tokenize(text[i:i+max_len]) for i in range(0, len(text), max_len)]
             output[key] = [tokens for partial in tokens_list for tokens in partial]
             total_token_count += sum(len(tokens) for partial in tokens_list for tokens in partial)
@@ -161,7 +164,12 @@ class Partition(object):
         startup_start = time.time()
         encoder = Encoder(self.args)
         tokenizer = build_tokenizer(self.args)
+        # 多进程处理 fin 生成的文档，调用 encoder.encode 进行编码。
+        # fin 是一个文档生成器，代表了所有输入文件中按顺序读取的数据流，用于供多进程进行文本编码处理。
+        # fin每次返回一个jsonl文档，包含了一行json数据
         pool = multiprocessing.Pool(self.workers, initializer=encoder.initializer)
+        # pool.imap 是 Python 多进程库 multiprocessing 中的一个方法，用于并发地按顺序处理可迭代对象，是对 map 的惰性（lazy）版本。 （惰性迭代不会一次将所有数据放到内存中）
+        # 使用多进程池，把 fin 生成的一条条 JSON 文档，分批（每 32 条）并行送到 encoder.encode() 中处理，按顺序返回处理结果。
         encoded_docs = pool.imap(encoder.encode, fin, 32)
         level = "document"
         if self.args.split_sentences:
@@ -170,11 +178,21 @@ class Partition(object):
         output_bin_files = {}
         output_idx_files = {}
         builders = {}
+        # {output_prefix}_{key}_document.bin：token ID 的二进制数据
+        # {output_prefix}_{key}_document.idx：索引文件，标识每条记录的位置
         for key in self.args.json_keys:
+            # 针对每个指定的 jsonl_key（例如 'text'），构建一个 .bin 和 .idx 文件
             output_bin_files[key] = "{}_{}_{}.bin".format(output_prefix,
                                                           key, level)
             output_idx_files[key] = "{}_{}_{}.idx".format(output_prefix,
                                                           key, level)
+            # 使用 IndexedDatasetBuilder 创建数据集构建器（写入二进制文件用）
+            """
+            indexed_dataset.IndexedDatasetBuilder(...) 是用于构建 高效可索引的数据集文件 的类，输出两个文件：
+                - .bin 文件：保存所有 token ID，连续的二进制数据
+                - .idx 文件：保存每一条记录的起止位置，支持快速随机访问
+            这个结构被 Megatron-LM、Fairseq 等用于加载预训练数据。
+            """
             builders[key] = indexed_dataset.IndexedDatasetBuilder(
                 output_bin_files[key],
                 dtype=indexed_dataset.DType.optimal_dtype(tokenizer.vocab_size),
@@ -184,6 +202,7 @@ class Partition(object):
         total_bytes_processed = 0
         total_token_count = 0  # add token count for process json file
         print("Time to startup:", startup_end - startup_start)
+        # 每个 doc 是由 encoder 处理过的 tokenized 文本。
         for i, (doc, sentence_lens, bytes_processed, current_token_count) in enumerate(encoded_docs, start=1):
             total_bytes_processed += bytes_processed
             total_token_count += current_token_count  # update token count
@@ -284,10 +303,20 @@ def get_args():
 
 
 def get_file_name(args, file_id):
+    # 将 args.input 的文件路径（如 "data/input.txt"）按扩展名分割：
+    # file_name = "data/input"
+    # extension = ".txt"
     file_name, extension = os.path.splitext(args.input)
+    # 构造带编号的输入文件名，如："data/input_0.txt"
     input_file_name = file_name + "_" + str(file_id) + extension
+    # 构造带 _ss_编号 的句子切分文件名，如："data/input_ss_0.txt"
     sentence_split_file = file_name + "_ss_" + str(file_id) + extension
     output_prefix = args.output_prefix + "_" + str(file_id)
+    """
+    'partition': 分片后的输入文件名
+    'sentence_split': 句子切分后的文件名
+    'output_prefix': 输出前缀（用于生成多个输出文件）
+    """
     file_names = {
         'partition': input_file_name,
         'sentence_split': sentence_split_file,
@@ -314,7 +343,7 @@ def main():
 
     in_ss_out_names = []  # 存储输入、句子分割输出、最终输出路径
 
-    if args.partitions == 1:
+    if args.partitions == 1: # 传入的是单个文件
         # 单分区处理
         file_name, extension = os.path.splitext(args.input)
         sentence_split_file = file_name + "_ss" + extension
@@ -323,21 +352,34 @@ def main():
             'sentence_split': sentence_split_file,
             'output_prefix': args.output_prefix}
         in_ss_out_names.append(file_names)
-    else:
+    else:   # 传入的args.input是多个文件
         # 多分区时处理多个输入文件
         file_list = os.listdir(args.input)
         in_file_names = [os.path.join(args.input, file) for file in file_list]
 
+        # 读取所有的文件然后根据partision_size重新组织输入文件
+        # 也就是说每个文件中的行数被固定为partision_size
         if args.keep_sequential_samples:
             total_sample_count = 0
             for filename in in_file_names:
                 with open(filename, "r") as fin:
+                    # fc从0开始索引
                     for fc, _ in enumerate(fin):  # 统计每个文件的样本行数
                         pass
                 total_sample_count += (fc + 1)
             partition_size = math.ceil(total_sample_count / args.partitions)  # 每个分区的样本数
 
         # 构造每个分区的输入输出路径
+        """
+        'partition': 分片后的输入文件名
+        'sentence_split': 句子切分后的文件名
+        'output_prefix': 输出前缀（用于生成多个输出文件）
+        file_names = {
+            'partition': input_file_name,
+            'sentence_split': sentence_split_file,
+            'output_prefix': output_prefix}
+        return file_names
+        """
         for idx in range(args.partitions):
             in_ss_out_name = get_file_name(args, idx)
             in_ss_out_names.append(in_ss_out_name)
