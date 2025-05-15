@@ -215,12 +215,78 @@ class Partition(object):
 
         fin.close()
         builders[key].finalize(output_idx_files[key])
+        
+    def process_arrow_file(self, file_name):
+        input_file_name, output_prefix = file_name
+        print("Opening", input_file_name)
+        fin = open(input_file_name, 'r', encoding='utf-8')
+        startup_start = time.time()
+        encoder = Encoder(self.args)
+        tokenizer = build_tokenizer(self.args)
+        # 多进程处理 fin 生成的文档，调用 encoder.encode 进行编码。
+        # fin 是一个文档生成器，代表了所有输入文件中按顺序读取的数据流，用于供多进程进行文本编码处理。
+        # fin每次返回一个jsonl文档，包含了一行json数据
+        pool = multiprocessing.Pool(self.workers, initializer=encoder.initializer)
+        # pool.imap 是 Python 多进程库 multiprocessing 中的一个方法，用于并发地按顺序处理可迭代对象，是对 map 的惰性（lazy）版本。 （惰性迭代不会一次将所有数据放到内存中）
+        # 使用多进程池，把 fin 生成的一条条 JSON 文档，分批（每 32 条）并行送到 encoder.encode() 中处理，按顺序返回处理结果。
+        encoded_docs = pool.imap(encoder.encode, fin, 32)
+        level = "document"
+        if self.args.split_sentences:
+            level = "sentence"
 
+        output_bin_files = {}
+        output_idx_files = {}
+        builders = {}
+        # {output_prefix}_{key}_document.bin：token ID 的二进制数据
+        # {output_prefix}_{key}_document.idx：索引文件，标识每条记录的位置
+        for key in self.args.json_keys:
+            # 针对每个指定的 jsonl_key（例如 'text'），构建一个 .bin 和 .idx 文件
+            output_bin_files[key] = "{}_{}_{}.bin".format(output_prefix,
+                                                          key, level)
+            output_idx_files[key] = "{}_{}_{}.idx".format(output_prefix,
+                                                          key, level)
+            # 使用 IndexedDatasetBuilder 创建数据集构建器（写入二进制文件用）
+            """
+            indexed_dataset.IndexedDatasetBuilder(...) 是用于构建 高效可索引的数据集文件 的类，输出两个文件：
+                - .bin 文件：保存所有 token ID，连续的二进制数据
+                - .idx 文件：保存每一条记录的起止位置，支持快速随机访问
+            这个结构被 Megatron-LM、Fairseq 等用于加载预训练数据。
+            """
+            builders[key] = indexed_dataset.IndexedDatasetBuilder(
+                output_bin_files[key],
+                dtype=indexed_dataset.DType.optimal_dtype(tokenizer.vocab_size),
+            )
+        startup_end = time.time()
+        proc_start = time.time()
+        total_bytes_processed = 0
+        total_token_count = 0  # add token count for process json file
+        print("Time to startup:", startup_end - startup_start)
+        # 每个 doc 是由 encoder 处理过的 tokenized 文本。
+        for i, (doc, sentence_lens, bytes_processed, current_token_count) in enumerate(encoded_docs, start=1):
+            total_bytes_processed += bytes_processed
+            total_token_count += current_token_count  # update token count
+            for key in doc.keys():
+                builders[key].add_document(doc[key], sentence_lens[key])
+            self.print_processing_stats(i, proc_start, total_bytes_processed, total_token_count)
 
+        print(f"Total token count: {total_token_count}")  #print total token 
+        token_count_queue.put(total_token_count) 
+
+        fin.close()
+        builders[key].finalize(output_idx_files[key])
+
+    
 
 def get_args():
     parser = argparse.ArgumentParser()
     group = parser.add_argument_group(title='input data')
+    """
+    使用 action='store_true'，默认情况下：
+        - 不传递参数时 → 值为 False
+        - 传递参数时（如 --load_from_arrow）→ 值为 True
+    """
+    group.add_argument('--load_from_arrow',action='store_true',help="whether load from arrow file")
+    # argparse 的 add_argument 默认 required=False，所以可以去掉。
     group.add_argument('--input', type=str, required=True,
                        help='Path to input JSON')
     group.add_argument('--json-keys', nargs='+', default=['text'],
@@ -399,7 +465,11 @@ def main():
             if args.keep_sequential_samples: line_count = 0
             for in_file_name in in_file_names:
                 # 支持 gzip 解压
-                fin = gzip.open(in_file_name, 'rt') if in_file_name.endswith(".gz") else open(in_file_name, 'r', encoding='utf-8')
+                if not args.load_from_arrow:
+                    fin = gzip.open(in_file_name, 'rt') if in_file_name.endswith(".gz") else open(in_file_name, 'r', encoding='utf-8')
+                else:
+                    # [TODO] 在这里增加arrow文件的读取
+                    pass
                 for line in fin:
                     partitioned_input_files[index].write(line)
                     if args.keep_sequential_samples:
@@ -420,6 +490,8 @@ def main():
 
     # 句子分割逻辑（若未完成）
     split_sentences_present = check_files_exist(in_ss_out_names, 'sentence_split', args.partitions)
+    # 在这里进行句子切分，按照max_len来进行分割
+    # args.split_sentences默认值为False
     if args.split_sentences and not split_sentences_present:
         processes = []
         for name in in_ss_out_names:
@@ -439,7 +511,11 @@ def main():
     processes = []
     input_key = 'sentence_split' if args.split_sentences else 'partition'
     for name in in_ss_out_names:
-        p = multiprocessing.Process(target=partition.process_json_file,
+        if not args.load_from_arrow:
+            p = multiprocessing.Process(target=partition.process_json_file,
+                                    args=((name[input_key], name['output_prefix']),))
+        else:
+            p = multiprocessing.Process(target=partition.process_arrow_file,
                                     args=((name[input_key], name['output_prefix']),))
         p.start()
         processes.append(p)
