@@ -558,23 +558,24 @@ def main():
 
         if args.partitions == 1:
             return
-
-    # 编码过程（多进程）
-    processes = []
-    input_key = 'sentence_split' if args.split_sentences else 'partition'
-    for name in in_ss_out_names:
-        if not args.load_from_arrow:
-            p = multiprocessing.Process(target=partition.process_json_file,
+        
+    input_key = 'sentence_split' if args.split_sentences else 'partition'   
+    batch_size = 256
+    for i in range(0, len(in_ss_out_names), batch_size):
+        batch = in_ss_out_names[i:i+batch_size]
+        processes = []
+        for name in batch:
+            if not args.load_from_arrow:
+                p = multiprocessing.Process(target=partition.process_json_file,
                                     args=((name[input_key], name['output_prefix']),))
-        else:
-            p = multiprocessing.Process(target=partition.process_arrow_file,
+            else:
+                p = multiprocessing.Process(target=partition.process_arrow_file,
                                     args=((name[input_key], name['output_prefix']),))
-        p.start()
-        processes.append(p)
-
-    for p in processes:
-        p.join()  # 等待所有进程完成
-
+            p.start()
+            processes.append(p)
+        for p in processes:
+            p.join()
+    
     # if args.partitions == 1:
     #     return
 
@@ -593,7 +594,7 @@ def main():
             output_bin_files[key],
             dtype=indexed_dataset.DType.optimal_dtype(tokenizer.vocab_size),
         )
-
+        # 合并所有的idx,bin文件，这通过add_index来实现
         for name in in_ss_out_names:
             parition_output_prefix = name['output_prefix']
             full_partition_output_prefix = f"{parition_output_prefix}_{key}_{level}"
