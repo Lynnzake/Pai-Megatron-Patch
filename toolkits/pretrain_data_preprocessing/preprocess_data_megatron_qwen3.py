@@ -91,10 +91,9 @@ class Encoder(object):
             wheather_attn_mask_zero = False # 判断当前数据的attention_mask是否含零
             input_ids = arrow_line["input_ids"]
             attention_mask = arrow_line["attention_mask"]
-            
-            if len(input_ids) > 0 and self.args.append_eod:
-                input_ids[-1] = Encoder.tokenizer.eod
-            
+            #[TODO] 是否需要添加eod再考虑
+            # if len(input_ids) > 0 and self.args.append_eod:
+            #     input_ids[-1] = Encoder.tokenizer.eod
             sequence_len = sum(attention_mask)
             self.total_token_count += sequence_len
             if len(input_ids) != sequence_len:# 如果attention_mask不全为1，那么取出有效长度部分的input_ids
@@ -155,6 +154,7 @@ class Partition(object):
         self.workers = workers
 
     # 打印处理进度信息
+    # self.print_processing_stats(i, proc_start, total_bytes_processed, total_token_count)
     def print_processing_stats(self, count, proc_start, total_bytes_processed, total_token_count):
         if count % self.args.log_interval == 0:
             current = time.time()
@@ -292,7 +292,7 @@ class Partition(object):
         startup_end = time.time()
         proc_start = time.time()
         total_bytes_processed = 0
-        total_token_count = 0  # add token count for process json file
+        total_token_count = 0  # add token count for process arrow file
         total_samples_count = 0
         total_attn_mask_zero_count = 0
         print("Time to startup:", startup_end - startup_start)
@@ -450,20 +450,33 @@ def main():
 
     in_ss_out_names = []  # 存储输入、句子分割输出、最终输出路径
 
-    if args.partitions == 1: # 传入的是单个文件
-        # 单分区处理
-        file_name, extension = os.path.splitext(args.input)
-        sentence_split_file = file_name + "_ss" + extension
-        file_names = {
-            'partition': args.input,
-            'sentence_split': sentence_split_file,
-            'output_prefix': args.output_prefix}
-        in_ss_out_names.append(file_names)
+    if args.partitions == 1: 
+        if args.load_from_arrow:
+            file_list = os.listdir(args.input)
+            # 多文件处理
+            in_file_names = [os.path.join(args.input, file) for file in file_list if file.endswith("arrow")]
+            for index,filename in enumerate(in_file_names):
+                _, extension = os.path.splitext(filename)
+                sentence_split_file = filename + "_ss" + extension
+                output_prefix = args.output_prefix + "_" + str(index)
+                file_names = {
+                    'partition': filename,
+                    'sentence_split': sentence_split_file,
+                    'output_prefix': output_prefix}
+                in_ss_out_names.append(file_names)
+        else:
+            # 单个文件处理
+            file_name, extension = os.path.splitext(args.input)
+            sentence_split_file = file_name + "_ss" + extension
+            file_names = {
+                'partition': args.input,
+                'sentence_split': sentence_split_file,
+                'output_prefix': args.output_prefix}
+            in_ss_out_names.append(file_names)
+        
     else:   # 传入的args.input是多个文件
         # 多分区时处理多个输入文件
-        file_list = os.listdir(args.input)
         in_file_names = [os.path.join(args.input, file) for file in file_list]
-
         # 读取所有的文件然后根据partision_size重新组织输入文件
         # 也就是说每个文件中的行数被固定为partision_size
         if args.keep_sequential_samples:
@@ -506,11 +519,9 @@ def main():
             if args.keep_sequential_samples: line_count = 0
             for in_file_name in in_file_names:
                 # 支持 gzip 解压
-                if not args.load_from_arrow:
-                    fin = gzip.open(in_file_name, 'rt') if in_file_name.endswith(".gz") else open(in_file_name, 'r', encoding='utf-8')
-                else:
-                    # [TODO] 在这里增加arrow文件的读取
-                    pass
+                
+                fin = gzip.open(in_file_name, 'rt') if in_file_name.endswith(".gz") else open(in_file_name, 'r', encoding='utf-8')
+            
                 for line in fin:
                     partitioned_input_files[index].write(line)
                     if args.keep_sequential_samples:
@@ -526,7 +537,7 @@ def main():
                 partitioned_input_files[idx].close()
 
     # 确保 worker 数可整除 partitions
-    assert args.workers % args.partitions == 0
+    #assert args.workers % args.partitions == 0
     partition = Partition(args, args.workers // args.partitions)  # 每个分区分配 worker 数
 
     # 句子分割逻辑（若未完成）
@@ -564,8 +575,8 @@ def main():
     for p in processes:
         p.join()  # 等待所有进程完成
 
-    if args.partitions == 1:
-        return
+    # if args.partitions == 1:
+    #     return
 
     level = "sentence" if args.split_sentences else "document"  # 用于命名输出文件
 
@@ -573,7 +584,7 @@ def main():
     output_idx_files = {}
     builders = {}
     tokenizer = build_tokenizer(args)  # 初始化分词器
-
+    print("===========starting to merge==============")
     # 对每个 json 键分别合并 bin/idx 文件
     for key in args.json_keys:
         output_bin_files[key] = f"{args.output_prefix}_{key}_{level}.bin"
