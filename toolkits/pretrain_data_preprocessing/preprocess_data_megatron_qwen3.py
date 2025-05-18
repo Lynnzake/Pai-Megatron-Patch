@@ -95,14 +95,14 @@ class Encoder(object):
             # if len(input_ids) > 0 and self.args.append_eod:
             #     input_ids[-1] = Encoder.tokenizer.eod
             sequence_len = sum(attention_mask)
-            self.total_token_count += sequence_len
             if len(input_ids) != sequence_len:# 如果attention_mask不全为1，那么取出有效长度部分的input_ids
-                self.total_attn_mask_zero += 1
+                attn_mask_zero = 1
                 input_ids = input_ids[:sequence_len]
             ids[key] = input_ids
             lens[key] = [sequence_len]
-            self.total_samples += 1
-        return ids,lens,sequence_len,self.total_token_count,self.total_attn_mask_zero,self.total_samples
+            sample_count=1
+            token_count = sequence_len
+        return ids,lens,sequence_len,token_count,attn_mask_zero,sample_count
         
     # 对文本进行编码，转为token id
     def encode(self, json_line):
