@@ -452,7 +452,7 @@ def main():
 
     if args.partitions == 1: 
         if args.load_from_arrow:
-            file_list = os.listdir(args.input)
+            file_list = sorted(os.listdir(args.input))
             # 多文件处理
             in_file_names = [os.path.join(args.input, file) for file in file_list if file.endswith("arrow")]
             for index,filename in enumerate(in_file_names):
